@@ -58,7 +58,7 @@ model = model_cls.load_from_checkpoint(
 	batch_size=1, num_workers=0, kwargs=dict(gpu=False)
 )
 model.eval(no_ema=False)
-model.cuda()
+# model.cuda()  # PyTorch 中将模型移动到 Nvidia 显卡的指令。去掉它，模型就会默认留在 CPU 上运行
 
 noisy_files = sorted(glob.glob(os.path.join(args.test_dir, "*.wav")))
 
