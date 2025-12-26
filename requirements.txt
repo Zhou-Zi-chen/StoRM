@@ -6,7 +6,7 @@ pesq==0.0.4
 pyroomacoustics==0.6.0
 PySoundFile==0.9.0.post1
 pystoi==0.3.3
-pytorch-lightning==1.8.3
+pytorch-lightning==1.8.4
 scipy==1.7.3
 sdeint==0.2.4
 SoundFile==0.10.3.post1
