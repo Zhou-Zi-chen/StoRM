@@ -74,11 +74,13 @@ class Specs(Dataset):
 		self.prep_file = h5py.File(sorted(glob(join(self.data_dir, f"*.hdf5")))[-1], 'r')
 
 	def __getitem__(self, i, raw=False):
-		x, sr = load(self.clean_files[i])			
+		# print(f"[DEBUG] __getitem__ called with i={i}")
+		x, sr = load(self.clean_files[i])            
 		y, sr = load(self.noisy_files[i])
 
 		min_len = min(x.size(-1), y.size(-1))
 		x, y = x[..., : min_len], y[..., : min_len] 
+		# print(f"[DEBUG] Loaded x.shape={x.shape}, y.shape={y.shape}")
 		
 		if x.ndimension() == 2 and self.spatial_channels == 1:
 			x, y = x[0].unsqueeze(0), y[0].unsqueeze(0) #Select first channel
