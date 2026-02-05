@@ -5,7 +5,8 @@ import sys
 
 import pytorch_lightning as pl
 from pytorch_lightning.strategies import DDPStrategy
-from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
+from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.loggers.wandb import WandbLogger
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 import torch
 
@@ -140,14 +141,26 @@ if __name__ == '__main__':
 	callbacks.append(TQDMProgressBar(refresh_rate=50))
 	if not args.nolog:
 		callbacks.append(ModelCheckpoint(dirpath=os.path.join(logger.log_dir, "checkpoints"), 
-			save_last=True, save_top_k=1, monitor="valid_loss", filename='{epoch}'))
+			save_last=True, save_top_k=1, monitor="valid_loss", filename='{epoch}-{valid_loss:.4f}'))
 		callbacks.append(ModelCheckpoint(dirpath=os.path.join(logger.log_dir, "checkpoints"), 
-			save_top_k=1, monitor="ValidationPESQ", mode="max", filename='{epoch}-{pesq:.2f}'))
+			save_top_k=1, monitor="ValidationPESQ", mode="max", filename='{epoch}-{ValidationPESQ:.2f}'))
+		callbacks.append(ModelCheckpoint(dirpath=os.path.join(logger.log_dir, "checkpoints"), 
+			save_top_k=1, monitor="ValidationSISDR", mode="max", filename='{epoch}-{ValidationSISDR:.2f}'))
+		callbacks.append(ModelCheckpoint(dirpath=os.path.join(logger.log_dir, "checkpoints"), 
+			save_top_k=1, monitor="ValidationESTOI", mode="max", filename='{epoch}-{ValidationESTOI:.2f}'))
 
 	# Initialize the Trainer and the DataModule
+	# 注释掉DDP分布式相关内容，改为默认单机单卡训练，兼容CPU环境
+	# trainer = pl.Trainer.from_argparse_args(
+	# 	arg_groups['pl.Trainer'],
+	# 	strategy=DDPStrategy(find_unused_parameters=False), 
+	# 	logger=logger,
+	# 	log_every_n_steps=10, num_sanity_val_steps=0, 
+	# 	callbacks=callbacks,
+	# 	max_epochs=1000
+	# )
 	trainer = pl.Trainer.from_argparse_args(
 		arg_groups['pl.Trainer'],
-		strategy=DDPStrategy(find_unused_parameters=False), 
 		logger=logger,
 		log_every_n_steps=10, num_sanity_val_steps=0, 
 		callbacks=callbacks,
