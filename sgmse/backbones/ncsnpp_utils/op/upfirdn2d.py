@@ -7,13 +7,28 @@ from torch.utils.cpp_extension import load
 
 
 module_path = os.path.dirname(__file__)
-upfirdn2d_op = load(
-    "upfirdn2d",
-    sources=[
-        os.path.join(module_path, "upfirdn2d.cpp"),
-        os.path.join(module_path, "upfirdn2d_kernel.cu"),
-    ],
-)
+
+# 尝试加载CUDA扩展，如果失败则使用CPU实现
+try:
+    upfirdn2d_op = load(
+        "upfirdn2d",
+        sources=[
+            os.path.join(module_path, "upfirdn2d.cpp"),
+            os.path.join(module_path, "upfirdn2d_kernel.cu"),
+        ],
+    )
+except Exception as e:
+    print(f"[INFO] CUDA扩展加载失败，使用CPU实现: {{e}}")
+    # 创建CPU替代
+    class Upfirdn2dCPU:
+        @staticmethod
+        def upfirdn2d(input, kernel, up_x, up_y, down_x, down_y, pad_x0, pad_x1, pad_y0, pad_y1):
+            # 调用原生的CPU实现
+            return upfirdn2d_native(
+                input, kernel, up_x, up_y, down_x, down_y, pad_x0, pad_x1, pad_y0, pad_y1
+            )
+    
+    upfirdn2d_op = Upfirdn2dCPU()
 
 
 class UpFirDn2dBackward(Function):
