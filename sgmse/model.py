@@ -21,6 +21,31 @@ VIS_EPOCHS = 5
 
 torch.autograd.set_detect_anomaly(True)
 
+
+def _tb_prepare_audio(audio: torch.Tensor) -> torch.Tensor:
+    """Format audio for TensorBoardX: shape (time, channels) with channels in {1, 2}."""
+    if not torch.is_tensor(audio):
+        audio = torch.as_tensor(audio)
+    audio = audio.detach()
+
+    if audio.ndim == 1:
+        audio = audio.unsqueeze(-1)  # (T) -> (T, 1)
+    elif audio.ndim == 2:
+        # if already (T, C) with C in {1,2} keep; if (C, T) swap
+        if audio.shape[1] not in (1, 2) and audio.shape[0] in (1, 2):
+            audio = audio.transpose(0, 1)
+    else:
+        # fallback: collapse to (T, C)
+        audio = audio.reshape(audio.shape[-1], -1)
+
+    if audio.shape[1] not in (1, 2):
+        audio = audio[:, :1]
+
+    peak = torch.max(torch.abs(audio))
+    if peak > 0:
+        audio = audio / peak
+    return audio
+
 class ScoreModel(pl.LightningModule):
     def __init__(self,
         backbone: str = "ncsnpp", sde: str = "ouvesde",
@@ -94,7 +119,7 @@ class ScoreModel(pl.LightningModule):
     def on_save_checkpoint(self, checkpoint):
         checkpoint['ema'] = self.ema.state_dict()
 
-    def train(self, mode, no_ema=False):
+    def train_with_ema(self, mode, no_ema=False):
         res = super().train(mode)  # call the standard `train` method with the given mode
         if not self._error_loading_ema:
             if mode == False and not no_ema:
@@ -107,8 +132,8 @@ class ScoreModel(pl.LightningModule):
                     self.ema.restore(self.parameters())  # restore the EMA weights (if stored)
         return res
 
-    def eval(self, no_ema=False):
-        return self.train(False, no_ema=no_ema)
+    def eval_with_ema(self, no_ema=False):
+        return self.train_with_ema(False, no_ema=no_ema)
 
     def _loss(self, err, err_time=None, err_mag=None):
         if self.loss_type == 'mse':
@@ -136,11 +161,13 @@ class ScoreModel(pl.LightningModule):
         return score
 
     def _step(self, batch, batch_idx):
+        # print(f"[DEBUG] _step called, batch_idx={batch_idx}, batch len={len(batch)}")
         if len(batch) == 2:
             x, y = batch
         elif len(batch) == 3:
             assert "bwe" in self.data_module.task, "Received metadata for a task which is not BWE"
             x, y, scale_factors = batch
+        # print(f"[DEBUG] _step x.shape={x.shape}, y.shape={y.shape}")
         t = torch.rand(x.shape[0], device=x.device) * (self.sde.T - self.t_eps) + self.t_eps
         mean, std = self.sde.marginal_prob(x, t, y)
         z = torch.randn_like(x)  # i.i.d. normal distributed with var=0.5 ---> problem: this cannot work for FreqOUVE, because is standard, and tries to match a score with a sigma which is not standard
@@ -159,7 +186,9 @@ class ScoreModel(pl.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx, discriminative=False, sr=16000):
+        # print(f"[DEBUG] validation_step called, batch_idx={batch_idx}")
         loss = self._step(batch, batch_idx)
+        # print(f"[DEBUG] validation_step loss={loss}")
         self.log('valid_loss', loss, on_step=False, on_epoch=True, batch_size=self.data_module.batch_size)
 
         # Evaluate speech enhancement performance
@@ -178,9 +207,24 @@ class ScoreModel(pl.LightningModule):
                 y_list, x_hat_list, x_list = audio
                 for idx, (y, x_hat, x) in enumerate(zip(y_list, x_hat_list, x_list)):
                     if self.current_epoch == 0:
-                        self.logger.experiment.add_audio(f"Epoch={self.current_epoch} Mix/{idx}", (y / torch.max(torch.abs(y))).unsqueeze(0), sample_rate=sr)
-                        self.logger.experiment.add_audio(f"Epoch={self.current_epoch} Clean/{idx}", (x / torch.max(x)).unsqueeze(0), sample_rate=sr)
-                    self.logger.experiment.add_audio(f"Epoch={self.current_epoch} Estimate/{idx}", (x_hat / torch.max(torch.abs(x_hat))).unsqueeze(0), sample_rate=sr)
+                        self.logger.experiment.add_audio(
+                            f"Epoch={self.current_epoch} Mix/{idx}",
+                            self._prepare_tb_audio(y),
+                            sample_rate=sr,
+                            global_step=self.current_epoch
+                        )
+                        self.logger.experiment.add_audio(
+                            f"Epoch={self.current_epoch} Clean/{idx}",
+                            self._prepare_tb_audio(x),
+                            sample_rate=sr,
+                            global_step=self.current_epoch
+                        )
+                    self.logger.experiment.add_audio(
+                        f"Epoch={self.current_epoch} Estimate/{idx}",
+                        self._prepare_tb_audio(x_hat),
+                        sample_rate=sr,
+                        global_step=self.current_epoch
+                    )
 
             if spec is not None:
                 figures = []
@@ -194,6 +238,9 @@ class ScoreModel(pl.LightningModule):
                 self.logger.experiment.add_figure(f"Epoch={self.current_epoch}/Spec", figures)
 
         return loss
+
+    def _prepare_tb_audio(self, audio: torch.Tensor) -> torch.Tensor:
+        return _tb_prepare_audio(audio)
 
     def to(self, *args, **kwargs):
         self.ema.to(*args, **kwargs)
@@ -282,7 +329,8 @@ class ScoreModel(pl.LightningModule):
         T_orig = y.size(1)
         norm_factor = y.abs().max().item()
         y = y / norm_factor
-        Y = torch.unsqueeze(self._forward_transform(self._stft(y.cuda())), 0)
+        device = y.device if hasattr(y, 'device') else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        Y = torch.unsqueeze(self._forward_transform(self._stft(y.to(device))), 0)
         Y = pad_spec(Y)
         if sampler_type == "pc":
             sampler = self.get_pc_sampler(predictor, corrector, Y, N=N,
@@ -308,9 +356,6 @@ class ScoreModel(pl.LightningModule):
             return x_hat, nfe, rtf
         else:
             return x_hat
-
-
-
 
 
 
@@ -353,10 +398,11 @@ class DiscriminativeModel(ScoreModel):
             norm_factor = y.abs().max().item()
             T_orig = y.size(1)
 
+            device = y.device if hasattr(y, 'device') else torch.device("cuda" if torch.cuda.is_available() else "cpu")
             if self.data_module.return_time:
-                Y = torch.unsqueeze((y/norm_factor).cuda(), 0) #1,D=1,T
+                Y = torch.unsqueeze((y/norm_factor).to(device), 0) #1,D=1,T
             else:
-                Y = torch.unsqueeze(self._forward_transform(self._stft((y/norm_factor).cuda())), 0) #1,D,F,T
+                Y = torch.unsqueeze(self._forward_transform(self._stft((y/norm_factor).to(device))), 0) #1,D,F,T
                 Y = pad_spec(Y)
             X_hat = self(Y)
             if self.dnn.FORCE_STFT_OUT:
@@ -371,17 +417,6 @@ class DiscriminativeModel(ScoreModel):
                     
     def validation_step(self, batch, batch_idx):
         return super().validation_step(batch, batch_idx, discriminative=True)
-    
-
-
-
-
-
-
-
-
-
-
 
 
 
@@ -514,7 +549,7 @@ class StochasticRegenerationModel(pl.LightningModule):
     def on_save_checkpoint(self, checkpoint):
         checkpoint['ema'] = self.ema.state_dict()
 
-    def train(self, mode, no_ema=False):
+    def train_with_ema(self, mode, no_ema=False):
         res = super().train(mode)  # call the standard `train` method with the given mode
         if not self._error_loading_ema:
             if mode == False and not no_ema:
@@ -527,8 +562,8 @@ class StochasticRegenerationModel(pl.LightningModule):
                     self.ema.restore(self.parameters())  # restore the EMA weights (if stored)
         return res
 
-    def eval(self, no_ema=False):
-        return self.train(False, no_ema=no_ema)
+    def eval_with_ema(self, no_ema=False):
+        return self.train_with_ema(False, no_ema=no_ema)
 
     def _loss(self, err, y_denoised, x):
         loss_score = self.loss_fn_score(err) if self.loss_type_score != "none" else None
@@ -625,9 +660,24 @@ class StochasticRegenerationModel(pl.LightningModule):
                 y_list, x_hat_list, x_list = audio
                 for idx, (y, x_hat, x) in enumerate(zip(y_list, x_hat_list, x_list)):
                     if self.current_epoch == 0:
-                        self.logger.experiment.add_audio(f"Epoch={self.current_epoch} Mix/{idx}", (y / torch.max(torch.abs(y))).unsqueeze(0), sample_rate=sr)
-                        self.logger.experiment.add_audio(f"Epoch={self.current_epoch} Clean/{idx}", (x / torch.max(x)).unsqueeze(0), sample_rate=sr)
-                    self.logger.experiment.add_audio(f"Epoch={self.current_epoch} Estimate/{idx}", (x_hat / torch.max(torch.abs(x_hat))).unsqueeze(0), sample_rate=sr)
+                        self.logger.experiment.add_audio(
+                            f"Epoch={self.current_epoch} Mix/{idx}",
+                            _tb_prepare_audio(y),
+                            sample_rate=sr,
+                            global_step=self.current_epoch
+                        )
+                        self.logger.experiment.add_audio(
+                            f"Epoch={self.current_epoch} Clean/{idx}",
+                            _tb_prepare_audio(x),
+                            sample_rate=sr,
+                            global_step=self.current_epoch
+                        )
+                    self.logger.experiment.add_audio(
+                        f"Epoch={self.current_epoch} Estimate/{idx}",
+                        _tb_prepare_audio(x_hat),
+                        sample_rate=sr,
+                        global_step=self.current_epoch
+                    )
 
             if spec is not None:
                 figures = []
@@ -729,7 +779,8 @@ class StochasticRegenerationModel(pl.LightningModule):
         T_orig = y.size(1)
         norm_factor = y.abs().max().item()
         y = y / norm_factor
-        Y = torch.unsqueeze(self._forward_transform(self._stft(y.cuda())), 0)
+        device = y.device if hasattr(y, 'device') else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        Y = torch.unsqueeze(self._forward_transform(self._stft(y.to(device))), 0)
         Y = pad_spec(Y)
         with torch.no_grad():
 
